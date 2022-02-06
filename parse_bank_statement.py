@@ -1,12 +1,12 @@
-from sys import path
-from typing import List
+import re, os, json
+import argparse
 import fitz
-from dataclasses import dataclass, field
+
+from typing import List
+from dataclasses import dataclass
 from enum import Enum, auto
 from collections import namedtuple
-import re, os
-import argparse
-import json
+
 
 Block = namedtuple('Block', 'x0, y0, x1, y1, text, block_no, block_type') 
 
@@ -21,27 +21,22 @@ class Record:
     type:RecordType = RecordType.TRANSACTION
 
 
-def parse_bank_statement(pdf_path,output_file='extrase.json',verbose=False,bank='raiffeisen'):
+def parse_bank_statement(pdf_path, verbose=False,bank='raiffeisen'):
     if os.path.isdir(pdf_path):
         filenames = [os.path.join(pdf_path, filename) for filename in os.listdir(pdf_path)]
     else:
         filenames = [pdf_path]
     
-    records = []
+    records = sum([get_records(filename) for filename in filenames], [])
 
-    for filename in filenames:
-        read_file(records, filename)
-    
     transactions = [record for record in records if record.type == RecordType.TRANSACTION]
-    solds = [record for record in records if record.type == RecordType.SOLD]
+    # solds = [record for record in records if record.type == RecordType.SOLD]
 
-    
     transactions_dicts = []
-
     if bank == 'raiffeisen':
-        extract_raiffeisen_transactions(transactions, transactions_dicts)
+        extract_raiffeisen_transactions(transactions, transactions_dicts=transactions_dicts)
     elif bank == 'alpha':
-        extract_alpha_bank_transactions(transactions, transactions_dicts)
+        extract_alpha_bank_transactions(transactions, transactions_dicts=transactions_dicts)
     else:
         raise Exception('Not a supported bank yet. Try `alpha` or `raiffeisen`.')
     
@@ -51,29 +46,14 @@ def parse_bank_statement(pdf_path,output_file='extrase.json',verbose=False,bank=
     return transactions_dicts
 
 
-def read_file(records, filename):
+def get_records(filename) -> List[Record]:
     doc = fitz.open(filename)
     pages = [page for page in doc]
+    records = []
     for page in pages:
         blocks = [Block(*block) for block in page.get_text("blocks")] 
         records += process_blocks(blocks)
-    return 
-
-def get_next_record(blocks) -> Record:
-    block = blocks.pop(0)
-    if re.search(r'Comision plata', block.text):
-        return Record([block], RecordType.TRANSACTION)
-    if re.match(r'\d\d\.\d\d\.\d\d\d\d*', block.text):
-        records = [block, blocks.pop(0)]
-
-        return Record(records, RecordType.TRANSACTION)
-
-    if block.text.startswith('Soldul zilei'):
-        return Record([block], RecordType.SOLD)
-
-    else:
-        record = Record([block], RecordType.OTHER)
-        return record
+    return records
 
 def process_blocks(blocks) -> List[Record]:
     records = []
@@ -83,14 +63,29 @@ def process_blocks(blocks) -> List[Record]:
 
     return records
 
+def get_next_record(blocks) -> Record:
+    block = blocks.pop(0)
+    if re.search(r'Comision plata', block.text):
+        return Record([block], RecordType.TRANSACTION)
+
+    if re.match(r'\d\d\.\d\d\.\d\d\d\d*', block.text):
+        records = [block, blocks.pop(0)]
+        return Record(records, RecordType.TRANSACTION)
+
+    if block.text.startswith('Soldul zilei'):
+        return Record([block], RecordType.SOLD)
+
+    else:
+        record = Record([block], RecordType.OTHER)
+        return record
 
 def extract_alpha_bank_transactions(transactions, transactions_dicts):
     for transaction in transactions:
         transaction_date, value_date, transaction_reference, description =\
             transaction.blocks[0].text.split('\n', 3)
-        sum = transaction.blocks[1].text
-        sign = -1 if re.match(r'\d*', sum)  else 1
-        signed_sum_in_bani = int(''.join(re.findall(r'\d*', sum))) * sign
+        sum_string = transaction.blocks[1].text
+        sign = -1 if re.match(r'\d*', sum_string)  else 1
+        signed_sum_in_bani = int(''.join(re.findall(r'\d*', sum_string))) * sign
         
         transactions_dicts += [
                 {
@@ -106,13 +101,13 @@ def extract_raiffeisen_transactions(transactions, transactions_dicts):
     for transaction in transactions:
         registration_date, transaction_date, description = transaction.blocks[0].text.split('\n', 2)
         x1 = transaction.blocks[-1].x1
-        sum = transaction.blocks[-1].text
+        sum_string = transaction.blocks[-1].text
         sign = 1 if abs(x1 - 454) > abs(x1 - 555)  else -1
         signed_sum_in_bani = int(
             ''.join(
                 re.findall(
                     r'\d*', 
-                    re.sub(r'\d\d\.\d\d\.\d\d\d\d', '', sum)
+                    re.sub(r'\d\d\.\d\d\.\d\d\d\d', '', sum_string)
                     )
                 )
             ) * sign
@@ -132,7 +127,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Extract transactions from bank statements.')
 
     parser.add_argument('filename', type=str, nargs='?',
-                        help='path to PDF statement')
+                        help='path to PDF statement or to directory with statements')
 
     parser.add_argument('-o','--output', dest='output', type=str, nargs='?',
                         default=None,
@@ -157,7 +152,7 @@ if __name__ == '__main__':
         output_file = os.path.splitext(pdf_path)[0]+'.json'
 
     ####################################
-    transactions_dicts = parse_bank_statement(pdf_path=pdf_path, output_file=output_file, verbose=verbose, bank=bank)
+    transactions_dicts = parse_bank_statement(pdf_path=pdf_path, verbose=verbose, bank=bank)
 
     with open(output_file, 'w') as f:
         json.dump(transactions_dicts, f)
